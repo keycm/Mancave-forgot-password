@@ -4,7 +4,7 @@ include 'config.php';
 require_once __DIR__ . '/reset_mailer.php'; 
 
 // =================================================================
-// 0. FETCH HERO IMAGES (NEW FEATURE)
+// 0. FETCH HERO IMAGES
 // =================================================================
 $hero_slides = [];
 $res_hero = mysqli_query($conn, "SELECT * FROM hero_slides ORDER BY id DESC");
@@ -13,7 +13,6 @@ if ($res_hero && mysqli_num_rows($res_hero) > 0) {
         $hero_slides[] = 'uploads/hero/' . $row['image_path'];
     }
 } else {
-    // Fallback if no images are uploaded
     $hero_slides = [
         'Grand Opening - Man Cave Gallery/img-21.jpg',
         'Grand Opening - Man Cave Gallery/img-10.jpg',
@@ -22,13 +21,10 @@ if ($res_hero && mysqli_num_rows($res_hero) > 0) {
     ];
 }
 
-// Calculate Animation Timings Dynamically
 $slide_count = count($hero_slides);
-$slide_duration = 5; // Seconds per slide
+$slide_duration = 5; 
 $total_duration = $slide_count * $slide_duration;
 
-// Calculate Keyframe percentages
-// Fade In (1s) -> Hold (4s) -> Fade Out (1s)
 $fade_in_pct = round((1 / $total_duration) * 100, 2); 
 $hold_pct    = round(($slide_duration / $total_duration) * 100, 2); 
 $fade_out_pct = round((($slide_duration + 1) / $total_duration) * 100, 2); 
@@ -37,105 +33,97 @@ $fade_out_pct = round((($slide_duration + 1) / $total_duration) * 100, 2);
 // 1. AUTHENTICATION & ACCOUNT LOGIC
 // =================================================================
 
-// --- AJAX HANDLER FOR FORGOT PASSWORD FLOW ---
-if (isset($_POST['ajax_action'])) {
-    header('Content-Type: application/json');
-    $action = $_POST['ajax_action'];
-    $response = ['status' => 'error', 'message' => 'An error occurred.'];
-
-    try {
-        if ($action === 'send_reset_otp') {
-            $email = $_POST['email'] ?? '';
-            
-            // Check if email exists
-            $stmt = $conn->prepare("SELECT id, username FROM users WHERE email = ?");
-            $stmt->bind_param("s", $email);
-            $stmt->execute();
-            $res = $stmt->get_result();
-            
-            if ($res->num_rows > 0) {
-                $user = $res->fetch_assoc();
-                $otp = random_int(100000, 999999);
-                $otp_hash = hash("sha256", $otp); // Hash OTP for security
-                $expiry = date("Y-m-d H:i:s", time() + 60 * 15); // 15 mins
-
-                // Update DB
-                $update = $conn->prepare("UPDATE users SET reset_token_hash = ?, reset_token_expires_at = ? WHERE id = ?");
-                $update->bind_param("ssi", $otp_hash, $expiry, $user['id']);
-                
-                if ($update->execute()) {
-                    // Send Email
-                    $mail = require __DIR__ . '/reset_mailer.php';
-                    $mail->setFrom("noreply@example.com", "ManCave Gallery");
-                    $mail->addAddress($email);
-                    $mail->Subject = "Password Reset OTP";
-                    $mail->isHTML(true);
-                    $mail->Body = "
-                        <h3>Password Reset Request</h3>
-                        <p>Hi " . htmlspecialchars($user['username']) . ",</p>
-                        <p>Your OTP code to reset your password is:</p>
-                        <h2 style='background: #eee; padding: 10px; display: inline-block;'>$otp</h2>
-                        <p>This code expires in 15 minutes.</p>
-                    ";
-                    $mail->send();
-                    $response = ['status' => 'success', 'message' => 'OTP sent to your email.'];
-                }
-            } else {
-                $response = ['status' => 'error', 'message' => 'Email not found.'];
-            }
-        } 
-        elseif ($action === 'verify_reset_otp') {
-            $email = $_POST['email'] ?? '';
-            $otp = $_POST['otp'] ?? '';
-            $otp_hash = hash("sha256", $otp);
-
-            $stmt = $conn->prepare("SELECT id FROM users WHERE email = ? AND reset_token_hash = ? AND reset_token_expires_at > NOW()");
-            $stmt->bind_param("ss", $email, $otp_hash);
-            $stmt->execute();
-            if ($stmt->get_result()->num_rows > 0) {
-                $response = ['status' => 'success', 'message' => 'OTP verified.'];
-            } else {
-                $response = ['status' => 'error', 'message' => 'Invalid or expired OTP.'];
-            }
-        }
-        elseif ($action === 'reset_password') {
-            $email = $_POST['email'] ?? '';
-            $otp = $_POST['otp'] ?? '';
-            $new_pass = $_POST['new_password'] ?? '';
-            $confirm_pass = $_POST['confirm_password'] ?? '';
-            $otp_hash = hash("sha256", $otp);
-
-            if ($new_pass !== $confirm_pass) {
-                $response = ['status' => 'error', 'message' => 'Passwords do not match.'];
-            } elseif (strlen($new_pass) < 8) {
-                $response = ['status' => 'error', 'message' => 'Password must be at least 8 characters.'];
-            } else {
-                // Verify OTP again before updating
-                $stmt = $conn->prepare("SELECT id FROM users WHERE email = ? AND reset_token_hash = ? AND reset_token_expires_at > NOW()");
-                $stmt->bind_param("ss", $email, $otp_hash);
-                $stmt->execute();
-                
-                if ($stmt->get_result()->num_rows > 0) {
-                    $new_hash = password_hash($new_pass, PASSWORD_DEFAULT);
-                    $update = $conn->prepare("UPDATE users SET password = ?, reset_token_hash = NULL, reset_token_expires_at = NULL WHERE email = ?");
-                    $update->bind_param("ss", $new_hash, $email);
-                    if ($update->execute()) {
-                        $response = ['status' => 'success', 'message' => 'Password reset successfully.'];
-                    }
-                } else {
-                    $response = ['status' => 'error', 'message' => 'Session expired. Please try again.'];
-                }
-            }
-        }
-    } catch (Exception $e) {
-        $response = ['status' => 'error', 'message' => 'Server error: ' . $e->getMessage()];
+// --- 1. RESET PASSWORD VERIFICATION (OTP) ---
+if (isset($_POST['verify_reset_otp'])) {
+    $email = $_SESSION['reset_email'] ?? '';
+    $otp = trim($_POST['otp']);
+    
+    if (empty($email)) {
+        $_SESSION['error_message'] = "Session expired. Try again.";
+        $_SESSION['show_forgot_modal'] = true;
+        header("Location: index.php"); 
+        exit;
     }
     
-    echo json_encode($response);
-    exit;
+    $stmt = $conn->prepare("SELECT id, reset_token_hash, reset_token_expires_at FROM users WHERE email = ?");
+    $stmt->bind_param("s", $email);
+    $stmt->execute();
+    $res = $stmt->get_result();
+
+    if ($res->num_rows > 0) {
+        $user = $res->fetch_assoc();
+        $expiry = strtotime($user['reset_token_expires_at']);
+        $otp_hash = hash("sha256", $otp);
+
+        if (time() > $expiry) {
+            $_SESSION['error_message'] = "OTP has expired. Please request a new one.";
+            $_SESSION['show_forgot_modal'] = true;
+            header("Location: index.php");
+            exit;
+        } elseif ($user['reset_token_hash'] !== $otp_hash) {
+            $_SESSION['error_message'] = "Incorrect OTP. Please try again.";
+            $_SESSION['show_reset_otp_modal'] = true;
+            header("Location: index.php");
+            exit;
+        } else {
+            // SUCCESS! Move to New Password Modal via Session
+            $_SESSION['reset_otp_verified'] = true;
+            $_SESSION['show_new_password_modal'] = true;
+            header("Location: index.php");
+            exit;
+        }
+    } else {
+        $_SESSION['error_message'] = "Account not found.";
+        $_SESSION['show_forgot_modal'] = true;
+        header("Location: index.php");
+        exit;
+    }
 }
 
-// --- ACCOUNT VERIFICATION LOGIC (OTP) - NEW ---
+// --- 2. UPDATE NEW PASSWORD ---
+if (isset($_POST['update_password'])) {
+    $email = $_SESSION['reset_email'] ?? '';
+    $new_pass = $_POST['new_password'];
+    $confirm_pass = $_POST['confirm_password'];
+    
+    if (!isset($_SESSION['reset_otp_verified']) || empty($email)) {
+        $_SESSION['error_message'] = "Unauthorized access.";
+        $_SESSION['show_forgot_modal'] = true;
+        header("Location: index.php"); 
+        exit;
+    }
+    
+    if ($new_pass !== $confirm_pass) {
+        $_SESSION['error_message'] = "Passwords do not match.";
+        $_SESSION['show_new_password_modal'] = true;
+        header("Location: index.php"); 
+        exit;
+    } elseif (strlen($new_pass) < 8) {
+        $_SESSION['error_message'] = "Password must be at least 8 characters.";
+        $_SESSION['show_new_password_modal'] = true;
+        header("Location: index.php"); 
+        exit;
+    } else {
+        $new_hash = password_hash($new_pass, PASSWORD_DEFAULT);
+        $update = $conn->prepare("UPDATE users SET password = ?, reset_token_hash = NULL, reset_token_expires_at = NULL WHERE email = ?");
+        $update->bind_param("ss", $new_hash, $email);
+        if ($update->execute()) {
+            unset($_SESSION['reset_email']);
+            unset($_SESSION['reset_otp_verified']);
+            $_SESSION['success_message'] = "Password reset successfully! Please log in.";
+            $_SESSION['show_login_modal'] = true;
+            header("Location: index.php"); 
+            exit;
+        } else {
+            $_SESSION['error_message'] = "Database error.";
+            $_SESSION['show_new_password_modal'] = true;
+            header("Location: index.php"); 
+            exit;
+        }
+    }
+}
+
+// --- 3. ACCOUNT VERIFICATION LOGIC (SIGNUP OTP) ---
 if (isset($_POST['verify_account'])) {
     $otp_input = trim($_POST['otp']);
     $email = $_SESSION['otp_email'] ?? '';
@@ -144,7 +132,7 @@ if (isset($_POST['verify_account'])) {
         $_SESSION['error_message'] = "Session expired. Please sign up again.";
     } elseif (empty($otp_input)) {
         $_SESSION['error_message'] = "Please enter the code.";
-        $_SESSION['show_verify_modal'] = true; // Keep modal open
+        $_SESSION['show_verify_modal'] = true; 
     } else {
         $stmt = $conn->prepare("SELECT id, account_activation_hash, reset_token_expires_at FROM users WHERE email = ?");
         $stmt->bind_param("s", $email);
@@ -157,12 +145,12 @@ if (isset($_POST['verify_account'])) {
         } elseif ($user['account_activation_hash'] == NULL) {
             $_SESSION['success_message'] = "Account already verified. Please Login.";
             unset($_SESSION['otp_email']);
-            header("Location: index.php?login=1");
+            $_SESSION['show_login_modal'] = true;
+            header("Location: index.php");
             exit;
         } else {
             $expiry = strtotime($user['reset_token_expires_at']);
             
-            // Force string comparison
             $db_otp = (string)$user['account_activation_hash'];
             $input_otp = (string)$otp_input;
 
@@ -170,17 +158,14 @@ if (isset($_POST['verify_account'])) {
                 $_SESSION['error_message'] = "Code expired. Please register again.";
             } elseif ($db_otp !== $input_otp) {
                 $_SESSION['error_message'] = "Incorrect code. Try again.";
-                $_SESSION['show_verify_modal'] = true; // Keep modal open
+                $_SESSION['show_verify_modal'] = true; 
             } else {
-                // --- SUCCESS: ACTIVATE ---
                 $upd = $conn->prepare("UPDATE users SET account_activation_hash = NULL, reset_token_expires_at = NULL WHERE id = ?");
                 $upd->bind_param("i", $user['id']);
                 if ($upd->execute()) {
-                    // UPDATED SUCCESS MESSAGE
                     $_SESSION['success_message'] = "You are successfully registered";
                     unset($_SESSION['otp_email']);
                     unset($_SESSION['show_verify_modal']);
-                    // Redirect to index (Alert will show via session check)
                     header("Location: index.php");
                     exit;
                 } else {
@@ -193,7 +178,7 @@ if (isset($_POST['verify_account'])) {
     exit;
 }
 
-// --- LOGIN LOGIC ---
+// --- 4. LOGIN LOGIC ---
 if (isset($_POST['login'])) {     
     $identifier = $_POST['identifier'];     
     $password = $_POST['password'];      
@@ -207,7 +192,7 @@ if (isset($_POST['login'])) {
         if (!empty($row['account_activation_hash'])) {
             $_SESSION['error_message'] = "Account not activated. Enter the code sent to your email.";
             $_SESSION['otp_email'] = $row['email'];
-            $_SESSION['show_verify_modal'] = true; // Open verify modal
+            $_SESSION['show_verify_modal'] = true;
             header("Location: index.php");
             exit();
         }
@@ -219,17 +204,19 @@ if (isset($_POST['login'])) {
             exit();
         } else {
             $_SESSION['error_message'] = "Invalid password!";
+            $_SESSION['show_login_modal'] = true;
         }
     } else {
         $_SESSION['error_message'] = "User not found!";
+        $_SESSION['show_login_modal'] = true;
     }
     if(isset($_SESSION['error_message'])) {
-        header("Location: index.php?login=1");
+        header("Location: index.php");
         exit();
     }
 } 
 
-// --- SIGNUP LOGIC ---
+// --- 5. SIGNUP LOGIC ---
 if (isset($_POST['sign'])) {
     $name = trim($_POST['username']);
     $email = trim($_POST['email']);
@@ -272,8 +259,8 @@ if (isset($_POST['sign'])) {
                         $mail->send();
                         $_SESSION['otp_email'] = $email;
                         $_SESSION['success_message'] = "Registration successful! Check your email for the code.";
-                        $_SESSION['show_verify_modal'] = true; // Use this flag instead of redirect
-                        header("Location: index.php"); // Redirect back to index
+                        $_SESSION['show_verify_modal'] = true; 
+                        header("Location: index.php"); 
                         exit;
                     } catch (Exception $e) {
                         $_SESSION['error_message'] = "Mailer Error: " . $mail->ErrorInfo;
@@ -285,22 +272,22 @@ if (isset($_POST['sign'])) {
         }
     }
     if(isset($_SESSION['error_message'])) {
-        header("Location: index.php?signup=1");
+        $_SESSION['show_signup_modal'] = true;
+        header("Location: index.php");
         exit();
     }
 }
 
 // =================================================================
-// 2. FETCH DATA (Artworks, Artists, etc)
+// 2. FETCH DATA
 // =================================================================
 
 $loggedIn = isset($_SESSION['username']);
 
-// 1. Fetch Artworks (Latest Arrivals - SCROLL ALL)
+// 1. Fetch Artworks 
 $seven_days_ago = date('Y-m-d', strtotime('-7 days'));
 $artworks = [];
 
-// UPDATED QUERY: Removed LIMIT 3, Changed ORDER BY to id DESC (Latest)
 $sql_art = "SELECT a.*, 
             (
                 SELECT status 
@@ -318,34 +305,34 @@ $sql_art = "SELECT a.*,
                 AND b2.status = 'completed' 
                 AND b2.preferred_date < '$seven_days_ago'
             ) = 0
-            ORDER BY id DESC"; // Fetching all latest
+            ORDER BY id DESC";
 
 $res_art = mysqli_query($conn, $sql_art);
 if ($res_art) { while ($row = mysqli_fetch_assoc($res_art)) { $artworks[] = $row; } }
 
-// 2. Fetch Single Artist (Meet The Artist - FIXED)
-$single_artist = []; // Default empty
-$sql_artist = "SELECT * FROM artists LIMIT 1"; // Fetch only the first artist
+// 2. Fetch Single Artist
+$single_artist = []; 
+$sql_artist = "SELECT * FROM artists LIMIT 1"; 
 $res_artist = mysqli_query($conn, $sql_artist);
 if ($res_artist && mysqli_num_rows($res_artist) > 0) { 
     $single_artist = mysqli_fetch_assoc($res_artist); 
 }
 
-// 3. Fetch Services (Gallery Services - LIMIT 3)
+// 3. Fetch Services
 $services_list = [];
 $sql_services = "SELECT * FROM services ORDER BY id ASC LIMIT 3";
 if ($res_services = mysqli_query($conn, $sql_services)) { 
     while ($row = mysqli_fetch_assoc($res_services)) { $services_list[] = $row; } 
 }
 
-// 4. Fetch Events (Upcoming Events - LIMIT 2)
+// 4. Fetch Events 
 $events_list = [];
 $sql_events = "SELECT * FROM events ORDER BY event_date ASC LIMIT 2";
 if ($res_events = mysqli_query($conn, $sql_events)) { 
     while ($row = mysqli_fetch_assoc($res_events)) { $events_list[] = $row; } 
 }
 
-// 5. Fetch Client Stories (LIMIT 3)
+// 5. Fetch Client Stories 
 $reviews_list = [];
 $sql_review = "SELECT r.*, u.username, s.name as service_name 
                FROM ratings r 
@@ -359,7 +346,7 @@ if ($res_review = mysqli_query($conn, $sql_review)) {
     }
 }
 
-// 6. Fetch News Updates (NEW CONNECTION TO manage_news.php)
+// 6. Fetch News Updates 
 $news_list = [];
 $sql_news = "SELECT * FROM announcements WHERE is_active = 1 ORDER BY created_at DESC LIMIT 3";
 if ($res_news = mysqli_query($conn, $sql_news)) {
@@ -404,10 +391,6 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
     <link href="https://unpkg.com/aos@2.3.1/dist/aos.css" rel="stylesheet">
     
     <style>
-    
-            /* ========================================== */
-        /* === DYNAMIC SLIDER ANIMATIONS === */
-        /* ========================================== */
         <?php if ($slide_count > 0): ?>
             @keyframes dynamicSlideShow {
                 0% { opacity: 0; transform: scale(1.05); }
@@ -425,8 +408,7 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
             }
             <?php endforeach; ?>
         <?php endif; ?>
-        
-        </style>
+    </style>
         
 </head>
 <body>
@@ -543,7 +525,6 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
                 <div class="col-6" data-aos="fade-right">
                     <div style="box-shadow: 0 15px 40px rgba(0,0,0,0.15); border-radius: 12px; overflow: hidden;">
                         <?php 
-                            // Check if image exists, otherwise use fallback
                             $artistImg = !empty($single_artist['image_path']) ? 'uploads/' . $single_artist['image_path'] : 'image_a6bbe0.jpg'; 
                         ?>
                         <img src="<?php echo htmlspecialchars($artistImg); ?>" alt="Artist Profile" style="width: 100%; display: block;">
@@ -596,7 +577,6 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
                         </div>
                     <?php else: ?>
                         <?php 
-                        // DOUBLE LOOP FOR INFINITE SCROLL
                         for ($i = 0; $i < 2; $i++):
                             foreach ($artworks as $art): 
                                 $isSold = ($art['status'] === 'Sold' || $art['active_booking_status'] === 'completed');
@@ -716,10 +696,7 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
                     <p class="text-center" style="grid-column: 1/-1;">No updates available.</p>
                 <?php else: foreach($news_list as $news): ?>
                     <div class="news-card-home" data-aos="fade-up">
-                        <?php 
-                            // Only display image container if an image path exists
-                            if(!empty($news['image_path'])): 
-                        ?>
+                        <?php if(!empty($news['image_path'])): ?>
                             <div class="news-img-container">
                                 <img src="uploads/<?php echo htmlspecialchars($news['image_path']); ?>" alt="<?php echo htmlspecialchars($news['title']); ?>">
                             </div>
@@ -912,7 +889,7 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
             <div class="modal-header-icon"><i class="fas fa-user-circle"></i></div>
             <h3>Welcome Back</h3>
             <p>Sign in to continue to your account</p>
-            <?php if(isset($_SESSION['error_message']) && isset($_GET['login'])): ?>
+            <?php if(isset($_SESSION['error_message']) && isset($_SESSION['show_login_modal'])): ?>
                 <div class="alert-error" style="text-align:left;">
                     <i class="fas fa-exclamation-circle"></i> 
                     <?php echo $_SESSION['error_message']; unset($_SESSION['error_message']); ?>
@@ -944,7 +921,7 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
             <div class="modal-header-icon"><i class="fas fa-rocket"></i></div>
             <h3>Join The Club</h3>
             <p>Create an account to reserve unique art</p>
-            <?php if(isset($_SESSION['error_message']) && isset($_GET['signup'])): ?>
+            <?php if(isset($_SESSION['error_message']) && isset($_SESSION['show_signup_modal'])): ?>
                 <div class="alert-error" style="text-align:left;">
                     <i class="fas fa-exclamation-circle"></i> 
                     <?php echo $_SESSION['error_message']; unset($_SESSION['error_message']); ?>
@@ -979,15 +956,24 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
         <div class="modal-card small">
             <button class="modal-close">×</button>
             <div class="modal-header-icon"><i class="fas fa-key"></i></div>
-            <h3>Forgot Password</h3>
-            <p>Enter your email to receive an OTP code.</p>
-            <form id="forgotForm">
+            <h3>Reset Password</h3>
+            <p style="margin-bottom: 15px; color: #666; font-size: 0.9rem;">Enter your email to receive an OTP code.</p>
+            
+            <?php if(isset($_SESSION['error_message']) && isset($_SESSION['show_forgot_modal'])): ?>
+                <div class="alert-error" style="color:#fff; background:#e74c3c; padding:10px; border-radius:5px; margin-bottom:10px; font-size:0.9rem; text-align:center;">
+                    <i class="fas fa-exclamation-circle"></i> <?php echo $_SESSION['error_message']; unset($_SESSION['error_message']); ?>
+                </div>
+            <?php endif; ?>
+
+            <form action="send_password_reset.php" method="POST">
                 <div class="friendly-input-group">
-                    <input type="email" id="resetEmail" name="email" required placeholder="Email Address">
+                    <input type="email" name="email" placeholder="Email Address" required>
                     <i class="fas fa-envelope"></i>
                 </div>
                 <button type="submit" class="btn-friendly">Send OTP</button>
-                <div class="modal-footer-link">Remembered it? <a href="#" class="switchBackToLogin">Log In</a></div>
+                <div class="modal-footer-link">
+                    Remembered your password? <a href="#" class="switchBackToLogin">Log In</a>
+                </div>
             </form>
         </div>
     </div>
@@ -996,14 +982,21 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
         <div class="modal-card small">
             <button class="modal-close">×</button>
             <div class="modal-header-icon"><i class="fas fa-shield-alt"></i></div>
-            <h3>Verify Code</h3>
-            <p>Enter the 6-digit code sent to your email.</p>
-            <form id="resetOtpForm">
+            <h3>Verify OTP</h3>
+            <p style="margin-bottom: 15px; color: #666; font-size: 0.9rem;">Enter the 6-digit code sent to <?php echo htmlspecialchars($_SESSION['reset_email'] ?? 'your email'); ?>.</p>
+
+            <?php if(isset($_SESSION['error_message']) && isset($_SESSION['show_reset_otp_modal'])): ?>
+                <div class="alert-error" style="color:#fff; background:#e74c3c; padding:10px; border-radius:5px; margin-bottom:10px; font-size:0.9rem; text-align:center;">
+                    <i class="fas fa-exclamation-circle"></i> <?php echo $_SESSION['error_message']; unset($_SESSION['error_message']); ?>
+                </div>
+            <?php endif; ?>
+
+            <form action="index.php" method="POST">
                 <div class="friendly-input-group">
-                    <input type="text" id="otpCode" name="otp" required placeholder="123456" maxlength="6" style="letter-spacing:5px; text-align:center; font-weight:700; font-size:1.2rem;">
+                    <input type="text" name="otp" required placeholder="000000" maxlength="6" style="text-align:center; letter-spacing:5px; font-weight:700; font-size:1.2rem;">
                     <i class="fas fa-key"></i>
                 </div>
-                <button type="submit" class="btn-friendly">Verify Code</button>
+                <button type="submit" name="verify_reset_otp" class="btn-friendly">Verify Code</button>
             </form>
         </div>
     </div>
@@ -1013,17 +1006,24 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
             <button class="modal-close">×</button>
             <div class="modal-header-icon"><i class="fas fa-lock-open"></i></div>
             <h3>New Password</h3>
-            <p>Create a secure new password for your account.</p>
-            <form id="newPasswordForm">
+            <p style="margin-bottom: 15px; color: #666; font-size: 0.9rem;">Create a secure new password.</p>
+
+            <?php if(isset($_SESSION['error_message']) && isset($_SESSION['show_new_password_modal'])): ?>
+                <div class="alert-error" style="color:#fff; background:#e74c3c; padding:10px; border-radius:5px; margin-bottom:10px; font-size:0.9rem; text-align:center;">
+                    <i class="fas fa-exclamation-circle"></i> <?php echo $_SESSION['error_message']; unset($_SESSION['error_message']); ?>
+                </div>
+            <?php endif; ?>
+
+            <form action="index.php" method="POST">
                 <div class="friendly-input-group">
-                    <input type="password" id="newPass" name="new_password" required placeholder="New Password">
+                    <input type="password" name="new_password" required placeholder="New Password">
                     <i class="fas fa-lock"></i>
                 </div>
                 <div class="friendly-input-group">
-                    <input type="password" id="confirmPass" name="confirm_password" required placeholder="Confirm Password">
+                    <input type="password" name="confirm_password" required placeholder="Confirm Password">
                     <i class="fas fa-check"></i>
                 </div>
-                <button type="submit" class="btn-friendly">Reset Password</button>
+                <button type="submit" name="update_password" class="btn-friendly">Update Password</button>
             </form>
         </div>
     </div>
@@ -1118,7 +1118,7 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
         </div>
     </div>
 
-    <?php if ($rate_booking): ?>
+    <?php if (isset($rate_booking) && $rate_booking): ?>
     <div class="modal-overlay" id="ratingModal">
         <div class="modal-card small">
             <div class="modal-header-icon"><i class="fas fa-star" style="color: #f39c12;"></i></div>
@@ -1155,11 +1155,9 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
     <script>
         AOS.init({ duration: 800, offset: 50 });
 
-        // --- THEME TOGGLE LOGIC ---
         const themeBtn = document.getElementById('themeToggle');
         const themeIcon = themeBtn.querySelector('i');
         
-        // Check saved theme
         if (localStorage.getItem('theme') === 'dark') {
             document.documentElement.setAttribute('data-theme', 'dark');
             themeIcon.classList.replace('fa-moon', 'fa-sun');
@@ -1178,7 +1176,6 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
             }
         });
 
-        // --- BURGER MENU TOGGLE ---
         function toggleMobileMenu() {
             const navLinks = document.getElementById('navLinks');
             navLinks.classList.toggle('active');
@@ -1195,12 +1192,16 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
         const copyModal = document.getElementById('copyModal');
         const ratingModal = document.getElementById('ratingModal');
         const messageModal = document.getElementById('messageModal'); 
-        const inquirySuccessModal = document.getElementById('inquirySuccessModal'); // NEW MODAL
+        const inquirySuccessModal = document.getElementById('inquirySuccessModal');
         const closeBtns = document.querySelectorAll('.modal-close');
 
         function closeModal(id) { 
-            if(id) document.getElementById(id).classList.remove('active');
-            else document.querySelectorAll('.modal-overlay').forEach(el => el.classList.remove('active'));
+            if(id) {
+                const modal = document.getElementById(id);
+                if(modal) modal.classList.remove('active');
+            } else {
+                document.querySelectorAll('.modal-overlay').forEach(el => el.classList.remove('active'));
+            }
         }
         
         closeBtns.forEach(btn => btn.addEventListener('click', () => closeModal()));
@@ -1211,143 +1212,51 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
         document.getElementById('switchRegister')?.addEventListener('click', (e) => { e.preventDefault(); closeModal(); signupModal.classList.add('active'); });
         document.getElementById('switchLogin')?.addEventListener('click', (e) => { e.preventDefault(); closeModal(); loginModal.classList.add('active'); });
 
-        // Forgot Password Logic
+        // Forgot Password Modal Triggers
         document.getElementById('openForgotBtn')?.addEventListener('click', (e) => { e.preventDefault(); closeModal(); forgotModal.classList.add('active'); });
         document.querySelectorAll('.switchBackToLogin').forEach(btn => {
             btn.addEventListener('click', (e) => { e.preventDefault(); closeModal(); loginModal.classList.add('active'); });
         });
 
-        // PHP Triggered Modals
-        <?php if(isset($_GET['login'])): ?> loginModal.classList.add('active'); <?php endif; ?>
-        <?php if(isset($_GET['signup'])): ?> signupModal.classList.add('active'); <?php endif; ?>
+        // --- SESSION-TRIGGERED MODALS (ROBUST AGAINST .HTACCESS) ---
+        <?php if(isset($_SESSION['show_login_modal'])): ?> 
+            loginModal.classList.add('active'); <?php unset($_SESSION['show_login_modal']); ?>
+        <?php endif; ?>
         
-        // AUTO OPEN VERIFY MODAL IF SESSION SET
-        <?php if(isset($_SESSION['show_verify_modal'])): ?>
-            verifyAccountModal.classList.add('active');
-            <?php unset($_SESSION['show_verify_modal']); ?>
+        <?php if(isset($_SESSION['show_signup_modal'])): ?> 
+            signupModal.classList.add('active'); <?php unset($_SESSION['show_signup_modal']); ?>
         <?php endif; ?>
 
-        // AUTO OPEN RATING MODAL
-        <?php if ($rate_booking): ?>
+        <?php if(isset($_SESSION['show_forgot_modal'])): ?> 
+            forgotModal.classList.add('active'); <?php unset($_SESSION['show_forgot_modal']); ?>
+        <?php endif; ?>
+        
+        <?php if(isset($_SESSION['show_reset_otp_modal'])): ?> 
+            resetOtpModal.classList.add('active'); <?php unset($_SESSION['show_reset_otp_modal']); ?>
+        <?php endif; ?>
+        
+        <?php if(isset($_SESSION['show_new_password_modal'])): ?> 
+            newPasswordModal.classList.add('active'); <?php unset($_SESSION['show_new_password_modal']); ?>
+        <?php endif; ?>
+        
+        <?php if(isset($_SESSION['show_verify_modal'])): ?>
+            verifyAccountModal.classList.add('active'); <?php unset($_SESSION['show_verify_modal']); ?>
+        <?php endif; ?>
+
+        <?php if (isset($rate_booking) && $rate_booking): ?>
             setTimeout(() => { ratingModal.classList.add('active'); }, 1500);
         <?php endif; ?>
 
-        // --- HELPER: SHOW MODAL MESSAGE ---
         window.showModalMessage = function(title, body) {
             document.getElementById('msgTitle').innerText = title;
             document.getElementById('msgBody').innerText = body;
             document.getElementById('messageModal').classList.add('active');
         }
 
-        // --- CHECK SESSION FOR SUCCESS MESSAGE (From OTP Verify) ---
-        <?php if(isset($_SESSION['success_message'])): ?>
+        <?php if(isset($_SESSION['success_message']) && !isset($_SESSION['show_reset_otp_modal'])): ?>
             showModalMessage('Success!', '<?php echo addslashes($_SESSION['success_message']); ?>');
-        <?php unset($_SESSION['success_message']); endif; ?>
-
-
-        // --- FORGOT PASSWORD FLOW (AJAX) ---
-        let resetEmail = '';
-
-        // Step 1: Send OTP
-        document.getElementById('forgotForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            resetEmail = document.getElementById('resetEmail').value;
-            const btn = this.querySelector('button');
-            const originalText = btn.innerHTML;
-            btn.disabled = true;
-            btn.innerHTML = '<i class="fas fa-spinner fa-spin"></i> Sending...';
-
-            const formData = new FormData();
-            formData.append('ajax_action', 'send_reset_otp');
-            formData.append('email', resetEmail);
-
-            // FIX: Changed './' to 'index.php' to avoid directory trailing slash redirects breaking POST data
-            fetch('index.php', { method: 'POST', body: formData }) 
-            .then(r => r.json())
-            .then(data => {
-                btn.disabled = false; btn.innerHTML = originalText;
-                if(data.status === 'success') {
-                    forgotModal.classList.remove('active');
-                    resetOtpModal.classList.add('active');
-                } else {
-                    alert(data.message);
-                }
-            }).catch((err) => { 
-                console.error('Fetch Error:', err);
-                btn.disabled = false; 
-                btn.innerHTML = originalText; 
-                alert('Error sending request. Check the console or your connection.'); 
-            });
-        });
-
-        // Step 2: Verify OTP
-        document.getElementById('resetOtpForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            const otp = document.getElementById('otpCode').value;
-            const btn = this.querySelector('button');
-            const originalText = btn.innerHTML;
-            btn.disabled = true; btn.innerHTML = 'Verifying...';
-
-            const formData = new FormData();
-            formData.append('ajax_action', 'verify_reset_otp');
-            formData.append('email', resetEmail);
-            formData.append('otp', otp);
-
-            // FIX: Changed './' to 'index.php'
-            fetch('index.php', { method: 'POST', body: formData }) 
-            .then(r => r.json())
-            .then(data => {
-                btn.disabled = false; btn.innerHTML = originalText;
-                if(data.status === 'success') {
-                    resetOtpModal.classList.remove('active');
-                    newPasswordModal.classList.add('active');
-                } else {
-                    alert(data.message);
-                }
-            }).catch((err) => { 
-                console.error('Fetch Error:', err);
-                btn.disabled = false; 
-                btn.innerHTML = originalText; 
-                alert('Error sending request. Check the console or your connection.'); 
-            });
-        });
-
-        // Step 3: Reset Password
-        document.getElementById('newPasswordForm').addEventListener('submit', function(e) {
-            e.preventDefault();
-            const newPass = document.getElementById('newPass').value;
-            const confirmPass = document.getElementById('confirmPass').value;
-            const otp = document.getElementById('otpCode').value; 
-            const btn = this.querySelector('button');
-            const originalText = btn.innerHTML;
-            btn.disabled = true; btn.innerHTML = 'Resetting...';
-
-            const formData = new FormData();
-            formData.append('ajax_action', 'reset_password');
-            formData.append('email', resetEmail);
-            formData.append('otp', otp);
-            formData.append('new_password', newPass);
-            formData.append('confirm_password', confirmPass);
-
-            // FIX: Changed './' to 'index.php'
-            fetch('index.php', { method: 'POST', body: formData }) 
-            .then(r => r.json())
-            .then(data => {
-                btn.disabled = false; btn.innerHTML = originalText;
-                if(data.status === 'success') {
-                    showModalMessage('Password Reset', 'Password reset successful! You can now log in.');
-                    closeModal();
-                    loginModal.classList.add('active');
-                } else {
-                    alert(data.message);
-                }
-            }).catch((err) => { 
-                console.error('Fetch Error:', err);
-                btn.disabled = false; 
-                btn.innerHTML = originalText; 
-                alert('Error sending request. Check the console or your connection.'); 
-            });
-        });
+            <?php unset($_SESSION['success_message']); ?>
+        <?php endif; ?>
 
         // --- RESERVATION ---
         window.openReserveModal = function(id, title) {
@@ -1369,7 +1278,7 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
             
             const icon = btn.querySelector('i');
             const countSpan = btn.querySelector('.fav-count');
-            let count = parseInt(countSpan.innerText) || 0; // Get current count
+            let count = parseInt(countSpan.innerText) || 0; 
             
             const isLiked = btn.classList.contains('active');
             const action = isLiked ? 'remove_id' : 'add_id';
@@ -1377,34 +1286,29 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
             btn.classList.add('animating');
             
             if(isLiked) {
-                // Unlike
                 btn.classList.remove('active');
                 icon.classList.remove('fas'); icon.classList.add('far');
-                count = Math.max(0, count - 1); // Decrement
+                count = Math.max(0, count - 1); 
             } else {
-                // Like
                 btn.classList.add('active');
                 icon.classList.remove('far'); icon.classList.add('fas');
-                count++; // Increment
+                count++; 
             }
             
-            countSpan.innerText = count; // Update UI
+            countSpan.innerText = count; 
 
-            // Send Request
             const formData = new FormData();
             formData.append(action, id);
-            fetch('favorites.php', { method: 'POST', body: formData }); // Ignore response, just send
+            fetch('favorites.php', { method: 'POST', body: formData }); 
 
             setTimeout(() => btn.classList.remove('animating'), 400);
         }
 
-        // --- INTERACTION: CART ANIMATION ---
         window.animateCart = function(btn) {
             btn.classList.add('animating');
             setTimeout(() => btn.classList.remove('animating'), 300);
         }
 
-        // --- NAVBAR & HEADER ---
         window.addEventListener('scroll', () => {
             const navbar = document.querySelector('.navbar');
             if(window.scrollY > 50) navbar.classList.add('scrolled');
@@ -1412,7 +1316,6 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
         });
 
         document.addEventListener('DOMContentLoaded', () => {
-            // NEW: INQUIRY FORM LOADING ANIMATION
             const inquiryForm = document.getElementById('inquiryForm');
             if(inquiryForm) {
                 inquiryForm.addEventListener('submit', function(e) {
@@ -1429,7 +1332,6 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
                     .then(response => response.text())
                     .then(result => {
                         if(result.trim() === 'success') {
-                            // CHANGED: Use showModalMessage instead of alert
                             showModalMessage('Sent!', 'Message sent successfully! We will get back to you soon.');
                             inquiryForm.reset();
                         } else {
@@ -1447,7 +1349,6 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
                 });
             }
 
-            // NEW: COMMISSION FORM HANDLER (AJAX)
             const commissionForm = document.getElementById('commissionForm');
             if(commissionForm) {
                 commissionForm.addEventListener('submit', function(e) {
@@ -1460,12 +1361,11 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
                     
                     const formData = new FormData(this);
                     
-                    fetch('inquire', { method: 'POST', body: formData }) // Uses existing inquire.php
+                    fetch('inquire', { method: 'POST', body: formData }) 
                     .then(response => response.text())
                     .then(result => {
                         if(result.trim() === 'success') {
                             closeModal('copyModal');
-                            // SHOW NEW SUCCESS MODAL
                             document.getElementById('inquirySuccessModal').classList.add('active');
                             commissionForm.reset();
                         } else {
@@ -1530,7 +1430,6 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
                                             <button class="btn-notif-close" title="Delete">×</button>
                                         `;
                                         
-                                        // Mark Read on Click
                                         item.addEventListener('click', (e) => {
                                             if (e.target.classList.contains('btn-notif-close')) return;
                                             const formData = new FormData();
@@ -1539,7 +1438,6 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
                                                 .then(() => fetchNotifications());
                                         });
 
-                                        // Delete Notification
                                         item.querySelector('.btn-notif-close').addEventListener('click', (e) => {
                                             e.stopPropagation();
                                             if(!confirm('Delete this notification?')) return;
@@ -1577,19 +1475,13 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
             if (notifDropdown) notifDropdown.addEventListener('click', (e) => e.stopPropagation());
         });
 
-        // ==========================================
-        // === AUTO SCROLL + MANUAL LOGIC ===
-        // ==========================================
         const track = document.getElementById('marqueeTrack');
-        let autoScrollSpeed = 0.5; // Adjust speed
+        let autoScrollSpeed = 0.5;
         let isHovered = false;
         let animationId;
 
         function autoScroll() {
             if (!isHovered && track) {
-                // If scrolled to halfway (end of first set), snap back to 0
-                // Note: This assumes precise duplication. 
-                // We use scrollWidth / 2 roughly.
                 if (track.scrollLeft >= (track.scrollWidth / 2) - 10) {
                     track.scrollLeft = 0;
                 } else {
@@ -1600,14 +1492,11 @@ if ($loggedIn && isset($_SESSION['user_id'])) {
         }
 
         if (track) {
-            // Start Auto Scroll
             animationId = requestAnimationFrame(autoScroll);
 
-            // Pause on Hover
             track.addEventListener('mouseenter', () => isHovered = true);
             track.addEventListener('mouseleave', () => isHovered = false);
             
-            // Also pause when hovering navigation buttons
             const navs = document.querySelectorAll('.marquee-nav button');
             navs.forEach(btn => {
                 btn.addEventListener('mouseenter', () => isHovered = true);
